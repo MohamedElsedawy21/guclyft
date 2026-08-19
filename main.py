@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from jose import jwt, JWTError
 from config import SECRET_KEY
 from auth import ALGORITHM
-
+from service import PasswordResetService
 
 Base.metadata.create_all(bind=engine)
 
@@ -107,3 +107,17 @@ def get_medical_document(request_id: int, token: str, db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="Request not found")
 
     return FileResponse(req.document_path)
+
+@app.post("/forgot-password")
+async def forgot_password(request: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
+    return await PasswordResetService.request_reset(request.email, db)
+
+
+@app.post("/verify-reset-code")
+def verify_reset_code(request: schemas.VerifyResetCodeRequest, db: Session = Depends(get_db)):
+    return PasswordResetService.verify_code(request.email, request.code, db)
+
+
+@app.post("/reset-password")
+def reset_password(request: schemas.ResetPasswordRequest, db: Session = Depends(get_db)):
+    return PasswordResetService.reset_password(request.reset_token, request.new_password, db)

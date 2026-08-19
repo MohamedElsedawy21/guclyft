@@ -80,3 +80,18 @@ def get_current_admin(token: str = Depends(oauth2_scheme), db: Session = Depends
 
     return admin
 
+def create_reset_token(gucian_id: str):
+    to_encode = {"sub": gucian_id, "purpose": "password_reset"}
+    expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def verify_reset_token(token: str) -> str:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("purpose") != "password_reset":
+            raise HTTPException(status_code=400, detail="Invalid reset token")
+        return payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")

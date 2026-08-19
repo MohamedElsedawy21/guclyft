@@ -144,3 +144,14 @@ class MedicalRequestReview(BaseModel):
         if v not in ("approved", "rejected"):
             raise ValueError("status must be 'approved' or 'rejected'")
         return v
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class VerifyResetCodeRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+class ResetPasswordRequest(BaseModel):
+    reset_token: str
+    new_password: str

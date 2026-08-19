@@ -98,3 +98,13 @@ class MedicalRequest(Base):
     )
 
     gucian = relationship("Gucian", foreign_keys=[gucian_id])
+
+class PasswordResetCode(Base):
+    __tablename__ = "password_reset_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    gucian_id = Column(String(50), ForeignKey("gucians.id"), nullable=False)
+    code = Column(String(6), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

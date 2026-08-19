@@ -5,6 +5,10 @@ import random
 import string
 import os
 import shutil
+import random
+from datetime import datetime, timedelta, timezone
+from fastapi_mail import FastMail, MessageSchema, MessageType
+from config import mail_config
 from datetime import datetime, timedelta, timezone
 
 UPLOAD_DIR = "uploads/medical_docs"
@@ -245,4 +249,65 @@ class AdminService:
         return db.query(models.Gucian).order_by(models.Gucian.createdat.desc()).all()
 
 
+class PasswordResetService:
 
+    @staticmethod
+    async def request_reset(email: str, db: Session):
+        gucian = db.query(models.Gucian).filter(models.Gucian.email == email).first()
+        if not gucian:
+            # Don't reveal whether the email exists — respond the same either way
+            return {"message": "If that email is registered, a code has been sent."}
+
+        code = ''.join(random.choices(string.digits, k=6))
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        reset_entry = models.PasswordResetCode(
+            gucian_id=gucian.id,
+            code=code,
+            expires_at=expires_at,
+        )
+        db.add(reset_entry)
+        db.commit()
+
+        message = MessageSchema(
+            subject="GUCLYFT Password Reset Code",
+            recipients=[email],
+            body=f"Your GUCLYFT password reset code is: {code}\n\nThis code expires in 10 minutes.",
+            subtype=MessageType.plain,
+        )
+        fm = FastMail(mail_config)
+        await fm.send_message(message)
+
+        return {"message": "If that email is registered, a code has been sent."}
+
+    @staticmethod
+    def verify_code(email: str, code: str, db: Session):
+        gucian = db.query(models.Gucian).filter(models.Gucian.email == email).first()
+        if not gucian:
+            raise HTTPException(status_code=400, detail="Invalid code")
+
+        entry = db.query(models.PasswordResetCode).filter(
+            models.PasswordResetCode.gucian_id == gucian.id,
+            models.PasswordResetCode.code == code,
+            models.PasswordResetCode.used == False,
+        ).order_by(models.PasswordResetCode.created_at.desc()).first()
+
+        if not entry or entry.expires_at < datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+        entry.used = True
+        db.commit()
+
+        reset_token = auth.create_reset_token(gucian.id)
+        return {"reset_token": reset_token}
+
+    @staticmethod
+    def reset_password(reset_token: str, new_password: str, db: Session):
+        gucian_id = auth.verify_reset_token(reset_token)
+        gucian = db.query(models.Gucian).filter(models.Gucian.id == gucian_id).first()
+        if not gucian:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        gucian.password = auth.hash_password(new_password)
+        db.commit()
+        return {"message": "Password reset successful"}

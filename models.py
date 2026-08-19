@@ -24,7 +24,8 @@ class Gucian(Base):
     lastname = Column(String(100), nullable=False)
     email = Column(String(150), unique=True, nullable=False)
     faculty = Column(String(50))
-    isinjured = Column(Boolean, default=False)
+    is_priority = Column(Boolean, default=False)
+    priority_until = Column(DateTime(timezone=True), nullable=True)
     username = Column(String(100), nullable=False)
     password = Column(String(100), nullable=False)
     createdat = Column(DateTime(timezone=True), server_default=func.now())
@@ -76,3 +77,24 @@ class Ride(Base):
     user = relationship("Gucian", foreign_keys=[user_id])
     pickup_location = relationship("Location", foreign_keys=[pickup_location_id])
     destination_location = relationship("Location", foreign_keys=[destination_location_id])
+
+class MedicalRequest(Base):
+    __tablename__ = "medical_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    gucian_id = Column(String(50), ForeignKey("gucians.id"), nullable=False)
+    request_type = Column(String(20), nullable=False)  # 'injury' or 'disability'
+    document_path = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")  # pending/approved/rejected
+    priority_days = Column(Integer, nullable=True)
+    priority_until = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(Integer, ForeignKey("admin.id"), nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("request_type IN ('injury','disability')", name="valid_request_type"),
+        CheckConstraint("status IN ('pending','approved','rejected')", name="valid_request_status"),
+    )
+
+    gucian = relationship("Gucian", foreign_keys=[gucian_id])

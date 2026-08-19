@@ -52,3 +52,31 @@ def get_current_gucian(token: str = Depends(oauth2_scheme), db: Session = Depend
         raise credentials_exception
 
     return gucian
+
+def get_current_admin(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+    )
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        role: str = payload.get("role")
+        if username is None or role is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    if role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can access this resource",
+        )
+
+    admin = db.query(models.Admin).filter(models.Admin.username == username).first()
+    if admin is None:
+        raise credentials_exception
+
+    return admin
+

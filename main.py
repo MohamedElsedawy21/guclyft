@@ -7,6 +7,14 @@ from service import RideService
 import auth
 from database import get_db
 from service import LocationService
+from service import AdminService
+from fastapi import UploadFile, File, Form
+from service import MedicalService
+from fastapi.responses import FileResponse
+from jose import jwt, JWTError
+from config import SECRET_KEY
+from auth import ALGORITHM
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -39,3 +47,63 @@ def schedule_ride(
 @app.get("/locations", response_model=list[schemas.LocationResponse])
 def get_locations(db: Session = Depends(get_db)):
     return LocationService.get_all_locations(db)
+
+
+@app.get("/admin/gucians", response_model=list[schemas.GucianAdminView])
+def get_all_gucians(
+    current_admin: models.Admin = Depends(auth.get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return AdminService.get_all_gucians(db)
+
+@app.post("/medical-requests", response_model=schemas.MedicalRequestResponse)
+def submit_medical_request(
+    request_type: str = Form(...),
+    file: UploadFile = File(...),
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return MedicalService.submit_request(request_type, file, current_gucian, db)
+
+
+@app.get("/medical-requests/me", response_model=list[schemas.MedicalRequestResponse])
+def get_my_medical_requests(
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return MedicalService.get_my_requests(current_gucian, db)
+
+
+@app.get("/admin/medical-requests", response_model=list[schemas.MedicalRequestAdminView])
+def get_all_medical_requests(
+    status: str = None,
+    current_admin: models.Admin = Depends(auth.get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return MedicalService.get_all_requests(db, status_filter=status)
+
+
+@app.put("/admin/medical-requests/{request_id}/review", response_model=schemas.MedicalRequestResponse)
+def review_medical_request(
+    request_id: int,
+    review: schemas.MedicalRequestReview,
+    current_admin: models.Admin = Depends(auth.get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return MedicalService.review_request(request_id, review, current_admin, db)
+
+
+@app.get("/admin/medical-requests/{request_id}/document")
+def get_medical_document(request_id: int, token: str, db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Forbidden")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    req = db.query(models.MedicalRequest).filter(models.MedicalRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    return FileResponse(req.document_path)

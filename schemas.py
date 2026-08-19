@@ -13,7 +13,6 @@ class GucianSignup(BaseModel):
     lastname: str
     email: EmailStr
     faculty: Optional[str] = None
-    isinjured: bool = False
     username: str
     password: str
 
@@ -23,10 +22,10 @@ class LoginRequest(BaseModel):
 
 class LoginResponse(BaseModel):
     token: str
-    role: str          # "admin" or "student"
+    role: str
     id: str
     name: str
-    isinjured: Optional[bool] = None
+    is_priority: Optional[bool] = None
 
 class RideCreate(BaseModel):
     pickup_location_id: int
@@ -94,3 +93,54 @@ class LocationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class GucianAdminView(BaseModel):
+    id: str
+    firstname: str
+    lastname: str
+    email: str
+    faculty: Optional[str] = None
+    username: str
+    createdat: datetime
+
+    class Config:
+        from_attributes = True
+
+class MedicalRequestResponse(BaseModel):
+    id: int
+    gucian_id: str
+    request_type: str
+    document_path: str
+    status: str
+    priority_days: Optional[int] = None
+    priority_until: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class MedicalRequestAdminView(BaseModel):
+    id: int
+    gucian_id: str
+    gucian_name: str
+    request_type: str
+    document_path: str
+    status: str
+    priority_days: Optional[int] = None
+    priority_until: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class MedicalRequestReview(BaseModel):
+    status: str  # "approved" or "rejected"
+    priority_days: Optional[int] = None  # required if approving an injury request
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v):
+        if v not in ("approved", "rejected"):
+            raise ValueError("status must be 'approved' or 'rejected'")
+        return v

@@ -15,6 +15,7 @@ from jose import jwt, JWTError
 from config import SECRET_KEY
 from auth import ALGORITHM
 from service import PasswordResetService
+from service import SendItemService
 
 Base.metadata.create_all(bind=engine)
 
@@ -28,7 +29,7 @@ def signup(user: schemas.GucianSignup, db: Session = Depends(get_db)):
 def login(credentials: schemas.LoginRequest, db: Session = Depends(get_db)):
     return AuthService.login(credentials, db)
 
-@app.post("/rides/book", response_model=schemas.RideResponse)
+@app.post("/rides/book", response_model=schemas.RideBookResponse)
 def book_ride(
     ride_data: schemas.RideCreate,
     current_gucian: models.Gucian = Depends(auth.get_current_gucian),
@@ -121,3 +122,28 @@ def verify_reset_code(request: schemas.VerifyResetCodeRequest, db: Session = Dep
 @app.post("/reset-password")
 def reset_password(request: schemas.ResetPasswordRequest, db: Session = Depends(get_db)):
     return PasswordResetService.reset_password(request.reset_token, request.new_password, db)
+
+@app.post("/send-items", response_model=schemas.SendItemResponse)
+def create_send_item(
+    item_data: schemas.SendItemCreate,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return SendItemService.create(item_data, current_gucian, db)
+
+
+@app.get("/send-items/mine", response_model=list[schemas.SendItemResponse])
+def get_my_send_items(
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return SendItemService.get_my_items(current_gucian, db)
+
+
+@app.put("/send-items/{item_id}/cancel", response_model=schemas.SendItemResponse)
+def cancel_send_item(
+    item_id: int,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return SendItemService.cancel(item_id, current_gucian, db)

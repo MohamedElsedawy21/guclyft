@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from fastapi import HTTPException, UploadFile
 import models, schemas, auth
 import random
@@ -10,9 +11,65 @@ from datetime import datetime, timedelta, timezone
 from fastapi_mail import FastMail, MessageSchema, MessageType
 from config import mail_config
 from datetime import datetime, timedelta, timezone
+from routing import graph, coords, get_route
 
 UPLOAD_DIR = "uploads/medical_docs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Statuses that still count as "waiting to be served" (from shahoda's queue logic)
+ACTIVE_STATUSES = ('queued', 'en_route', 'arrived', 'in_progress')
+
+
+def get_queue_position(db: Session, ride_id: int):
+    """
+    Returns (position, total_active) for a given ride.
+    Position 1 = next up. Returns (None, total_active) if the ride
+    is not currently active (e.g. already completed/cancelled).
+
+    Ordering rule: priority rides are always served before normal rides,
+    regardless of creation time. Within the same priority tier, earlier
+    created_at goes first (FIFO).
+    """
+    ride = db.execute(
+        text("SELECT id, status, created_at, is_priority FROM rides WHERE id = :id"),
+        {"id": ride_id}
+    ).fetchone()
+
+    if ride is None:
+        return None, None
+
+    total_active = db.execute(
+        text("SELECT COUNT(*) as c FROM rides WHERE status = ANY(:statuses)"),
+        {"statuses": list(ACTIVE_STATUSES)}
+    ).fetchone().c
+
+    if ride.status not in ACTIVE_STATUSES:
+        return None, total_active
+
+    if ride.is_priority:
+        ahead_count = db.execute(
+            text("""
+                SELECT COUNT(*) as c FROM rides
+                WHERE status = ANY(:statuses)
+                AND is_priority = TRUE
+                AND created_at < :created_at
+            """),
+            {"statuses": list(ACTIVE_STATUSES), "created_at": ride.created_at}
+        ).fetchone().c
+    else:
+        ahead_count = db.execute(
+            text("""
+                SELECT COUNT(*) as c FROM rides
+                WHERE status = ANY(:statuses)
+                AND (
+                    is_priority = TRUE
+                    OR created_at < :created_at
+                )
+            """),
+            {"statuses": list(ACTIVE_STATUSES), "created_at": ride.created_at}
+        ).fetchone().c
+
+    return ahead_count + 1, total_active
 
 class PriorityHelper:
     @staticmethod
@@ -173,14 +230,39 @@ class RideService:
     def book_ride(ride_data: schemas.RideCreate, current_gucian: models.Gucian, db: Session):
         current_gucian = PriorityHelper.check_and_expire(current_gucian, db)
 
-        pickup = db.query(models.Location).filter(models.Location.id == ride_data.pickup_location_id).first()
-        destination = db.query(models.Location).filter(models.Location.id == ride_data.destination_location_id).first()
-
-        if not pickup or not destination:
-            raise HTTPException(status_code=404, detail="Pickup or destination location not found")
-
-        if pickup.id == destination.id:
+        if ride_data.pickup_location_id == ride_data.destination_location_id:
             raise HTTPException(status_code=400, detail="Pickup and destination cannot be the same")
+
+        # Look up names from the IDs the frontend already sends — one extra
+        # SELECT each for pickup and dropoff — then hand those names to get_route().
+        pickup_row = db.execute(
+            text("SELECT name FROM locations WHERE id = :id"),
+            {"id": ride_data.pickup_location_id}
+        ).fetchone()
+        dropoff_row = db.execute(
+            text("SELECT name FROM locations WHERE id = :id"),
+            {"id": ride_data.destination_location_id}
+        ).fetchone()
+
+        if pickup_row is None:
+            raise HTTPException(status_code=404, detail="Pickup location not found")
+        if dropoff_row is None:
+            raise HTTPException(status_code=404, detail="Destination location not found")
+
+        pickup_name = pickup_row.name
+        dropoff_name = dropoff_row.name
+
+        if pickup_name not in graph:
+            raise HTTPException(status_code=400, detail=f"Location '{pickup_name}' exists but has no route data")
+        if dropoff_name not in graph:
+            raise HTTPException(status_code=400, detail=f"Location '{dropoff_name}' exists but has no route data")
+
+        route_result = get_route(graph, coords, pickup_name, dropoff_name)
+        if route_result["path"] is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No route found between '{pickup_name}' and '{dropoff_name}'"
+            )
 
         verification_code = ''.join(random.choices(string.digits, k=4))
 
@@ -200,7 +282,24 @@ class RideService:
         db.commit()
         db.refresh(new_ride)
 
-        return new_ride
+        position, total_active = get_queue_position(db, new_ride.id)
+
+        return {
+            "id": new_ride.id,
+            "user_id": new_ride.user_id,
+            "pickup_location_id": new_ride.pickup_location_id,
+            "destination_location_id": new_ride.destination_location_id,
+            "status": new_ride.status,
+            "is_priority": new_ride.is_priority,
+            "is_prebooked": new_ride.is_prebooked,
+            "scheduled_time": new_ride.scheduled_time,
+            "passenger_count": new_ride.passenger_count,
+            "verification_code": new_ride.verification_code,
+            "created_at": new_ride.created_at,
+            "route": route_result,
+            "queue_position": position,
+            "total_active_rides": total_active,
+        }
 
     @staticmethod
     def schedule_ride(ride_data: schemas.RideScheduleCreate, current_gucian: models.Gucian, db: Session):
@@ -311,3 +410,54 @@ class PasswordResetService:
         gucian.password = auth.hash_password(new_password)
         db.commit()
         return {"message": "Password reset successful"}
+
+class SendItemService:
+
+    @staticmethod
+    def create(item_data: schemas.SendItemCreate, sender: models.Gucian, db: Session):
+        pickup = db.query(models.Location).filter(models.Location.id == item_data.pickup_location_id).first()
+        dropoff = db.query(models.Location).filter(models.Location.id == item_data.dropoff_location_id).first()
+
+        if not pickup or not dropoff:
+            raise HTTPException(status_code=404, detail="Pickup or dropoff location not found")
+        if pickup.id == dropoff.id:
+            raise HTTPException(status_code=400, detail="Pickup and dropoff cannot be the same")
+
+        if item_data.recipient_id:
+            recipient = db.query(models.Gucian).filter(models.Gucian.id == item_data.recipient_id).first()
+            if not recipient:
+                raise HTTPException(status_code=404, detail="Recipient not found")
+
+        new_item = models.SendItem(
+            sender_id=sender.id,
+            recipient_id=item_data.recipient_id,
+            pickup_location_id=item_data.pickup_location_id,
+            dropoff_location_id=item_data.dropoff_location_id,
+            item_description=item_data.item_description,
+            status="pending",
+        )
+        db.add(new_item)
+        db.commit()
+        db.refresh(new_item)
+        return new_item
+
+    @staticmethod
+    def get_my_items(gucian: models.Gucian, db: Session):
+        return db.query(models.SendItem).filter(
+            (models.SendItem.sender_id == gucian.id) | (models.SendItem.recipient_id == gucian.id)
+        ).order_by(models.SendItem.created_at.desc()).all()
+
+    @staticmethod
+    def cancel(item_id: int, gucian: models.Gucian, db: Session):
+        item = db.query(models.SendItem).filter(models.SendItem.id == item_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        if item.sender_id != gucian.id:
+            raise HTTPException(status_code=403, detail="You can only cancel your own requests")
+        if item.status != "pending":
+            raise HTTPException(status_code=400, detail="Only pending items can be cancelled")
+
+        item.status = "cancelled"
+        db.commit()
+        db.refresh(item)
+        return item

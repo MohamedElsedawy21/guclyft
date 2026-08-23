@@ -88,8 +88,32 @@ class RideResponse(BaseModel):
 class LocationResponse(BaseModel):
     id: int
     name: str
-    latitude: float
-    longitude: float
+
+    class Config:
+        from_attributes = True
+
+
+class RouteInfo(BaseModel):
+    path: Optional[list[str]] = None
+    distance_m: Optional[float] = None
+    eta_minutes: Optional[float] = None
+
+
+class RideBookResponse(BaseModel):
+    id: int
+    user_id: str
+    pickup_location_id: int
+    destination_location_id: int
+    status: str
+    is_priority: bool
+    is_prebooked: bool
+    scheduled_time: Optional[datetime] = None
+    passenger_count: int
+    verification_code: Optional[str] = None
+    created_at: datetime
+    route: RouteInfo
+    queue_position: Optional[int] = None
+    total_active_rides: int
 
     class Config:
         from_attributes = True
@@ -155,3 +179,23 @@ class VerifyResetCodeRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     reset_token: str
     new_password: str
+
+class SendItemCreate(BaseModel):
+    pickup_location_id: int
+    dropoff_location_id: int
+    item_description: str
+    recipient_id: Optional[str] = None
+
+class SendItemResponse(BaseModel):
+    id: int
+    sender_id: str
+    recipient_id: Optional[str] = None
+    pickup_location_id: int
+    dropoff_location_id: int
+    item_description: str
+    status: str
+    created_at: datetime
+    delivered_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

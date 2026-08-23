@@ -5,6 +5,8 @@ import 'login_screen.dart';
 import 'book_ride_screen.dart';
 import 'schedule_ride_screen.dart';
 import 'account_screen.dart';
+import '../widgets/campus_map.dart';
+import '../services/location_service.dart';
 
 class HomeScreen extends StatelessWidget {
   final String name;

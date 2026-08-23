@@ -3,7 +3,7 @@ import '../theme/app_theme.dart';
 import '../widgets/guclyft_logo.dart';
 import '../services/auth_service.dart';
 import 'signup_screen.dart';
-import 'home_screen.dart';
+import 'gucian_shell.dart';
 import 'admin_home_screen.dart';
 import 'forgot_password_screen.dart';
 
@@ -40,7 +40,7 @@ class _LoginScreenState extends State<LoginScreen> {
     } else {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => HomeScreen(name: result.name, role: result.role)),
+          MaterialPageRoute(builder: (_) => GucianShell(name: result.name)),
       );
     }
   } catch (e) {

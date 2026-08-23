@@ -36,8 +36,6 @@ class Location(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
-    latitude = Column(Float, nullable=False)
-    longitude = Column(Float, nullable=False)
 
 
 class Ride(Base):
@@ -108,3 +106,29 @@ class PasswordResetCode(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class SendItem(Base):
+    __tablename__ = "send_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sender_id = Column(String(50), ForeignKey("gucians.id"), nullable=False)
+    recipient_id = Column(String(50), ForeignKey("gucians.id"), nullable=True)
+    pickup_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    dropoff_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    item_description = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','in_transit','delivered','cancelled')",
+            name="valid_send_item_status"
+        ),
+    )
+
+    sender = relationship("Gucian", foreign_keys=[sender_id])
+    recipient = relationship("Gucian", foreign_keys=[recipient_id])
+    pickup_location = relationship("Location", foreign_keys=[pickup_location_id])
+    dropoff_location = relationship("Location", foreign_keys=[dropoff_location_id])

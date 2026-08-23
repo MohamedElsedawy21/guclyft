@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'api_service.dart';
+import '../data/campus_coords.dart';
 
 class AppLocation {
   final int id;
@@ -10,11 +11,12 @@ class AppLocation {
   AppLocation({required this.id, required this.name, required this.latitude, required this.longitude});
 
   factory AppLocation.fromJson(Map<String, dynamic> json) {
+    final coords = campusCoords[json['name']];
     return AppLocation(
       id: json['id'],
       name: json['name'],
-      latitude: (json['latitude'] as num).toDouble(),
-      longitude: (json['longitude'] as num).toDouble(),
+      latitude: coords != null ? coords[0] : (json['latitude'] as num).toDouble(),
+      longitude: coords != null ? coords[1] : (json['longitude'] as num).toDouble(),
     );
   }
 }

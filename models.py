@@ -38,6 +38,22 @@ class Location(Base):
     name = Column(String(255), nullable=False)
 
 
+class RideGroup(Base):
+    __tablename__ = "ride_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    pickup_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    destination_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    passenger_total = Column(Integer, nullable=False, default=0)
+    locked = Column(Boolean, nullable=False, default=False)
+    assigned_car_id = Column(Integer, ForeignKey("cars.id"), nullable=True)  # ADD THIS LINE
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pickup_location = relationship("Location", foreign_keys=[pickup_location_id])
+    destination_location = relationship("Location", foreign_keys=[destination_location_id])
+    rides = relationship("Ride", back_populates="group")
+
+
 class Ride(Base):
     __tablename__ = "rides"
 
@@ -45,6 +61,9 @@ class Ride(Base):
     user_id = Column(String(50), ForeignKey("gucians.id"), nullable=False)
     pickup_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     destination_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+
+    # Every ride belongs to a group, even if it's riding solo (group of 1).
+    group_id = Column(Integer, ForeignKey("ride_groups.id"), nullable=True)
 
     status = Column(String(20), nullable=False, default="queued")
 
@@ -75,6 +94,8 @@ class Ride(Base):
     user = relationship("Gucian", foreign_keys=[user_id])
     pickup_location = relationship("Location", foreign_keys=[pickup_location_id])
     destination_location = relationship("Location", foreign_keys=[destination_location_id])
+    group = relationship("RideGroup", back_populates="rides", foreign_keys=[group_id])
+    
 
 class MedicalRequest(Base):
     __tablename__ = "medical_requests"
@@ -132,3 +153,24 @@ class SendItem(Base):
     recipient = relationship("Gucian", foreign_keys=[recipient_id])
     pickup_location = relationship("Location", foreign_keys=[pickup_location_id])
     dropoff_location = relationship("Location", foreign_keys=[dropoff_location_id])
+
+
+class Car(Base):
+    __tablename__ = "cars"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    username = Column(String(100), unique=True, nullable=False)
+    password = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default="idle")
+    current_lat = Column(Float, nullable=True)
+    current_lng = Column(Float, nullable=True)
+    current_group_id = Column(Integer, ForeignKey("ride_groups.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('idle','en_route','arrived','in_progress','offline')",
+            name="valid_car_status"
+        ),
+    )

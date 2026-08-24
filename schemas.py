@@ -114,6 +114,8 @@ class RideBookResponse(BaseModel):
     route: RouteInfo
     queue_position: Optional[int] = None
     total_active_rides: int
+    group_id: Optional[int] = None
+    group_size: Optional[int] = None  # total passengers currently in this ride's carpool group
 
     class Config:
         from_attributes = True

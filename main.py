@@ -16,6 +16,8 @@ from config import SECRET_KEY
 from auth import ALGORITHM
 from service import PasswordResetService
 from service import SendItemService
+from service import CarService
+from service import VerificationService
 
 Base.metadata.create_all(bind=engine)
 
@@ -147,3 +149,29 @@ def cancel_send_item(
     db: Session = Depends(get_db),
 ):
     return SendItemService.cancel(item_id, current_gucian, db)
+
+@app.post("/cars/next-ride")
+def get_next_ride(current_car: models.Car = Depends(auth.get_current_car), db: Session = Depends(get_db)):
+    return CarService.get_next_ride(current_car, db)
+
+@app.put("/cars/arrived")
+def mark_arrived(current_car: models.Car = Depends(auth.get_current_car), db: Session = Depends(get_db)):
+    return CarService.mark_arrived(current_car, db)
+
+@app.put("/cars/complete")
+def complete_ride(current_car: models.Car = Depends(auth.get_current_car), db: Session = Depends(get_db)):
+    return CarService.complete_ride(current_car, db)
+
+@app.put("/cars/location")
+def update_location(lat: float, lng: float, current_car: models.Car = Depends(auth.get_current_car), db: Session = Depends(get_db)):
+    return CarService.update_location(current_car, lat, lng, db)
+
+
+@app.post("/rides/{ride_id}/verify", response_model=schemas.RideResponse)
+def verify_ride(
+    ride_id: int,
+    code: str,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return VerificationService.verify_code(ride_id, code, current_gucian, db)

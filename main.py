@@ -8,7 +8,7 @@ import auth
 from database import get_db
 from service import LocationService
 from service import AdminService
-from fastapi import UploadFile, File, Form
+from fastapi import UploadFile, File, Form,FastAPI, Depends, HTTPException
 from service import MedicalService
 from fastapi.responses import FileResponse
 from jose import jwt, JWTError
@@ -17,6 +17,7 @@ from auth import ALGORITHM
 from service import PasswordResetService
 from service import SendItemService
 from service import CarService
+from service import GraceHelper
 from service import VerificationService
 
 Base.metadata.create_all(bind=engine)
@@ -39,7 +40,7 @@ def book_ride(
 ):
     return RideService.book_ride(ride_data, current_gucian, db)
 
-@app.post("/rides/schedule", response_model=schemas.RideResponse)
+@app.post("/rides/schedule", response_model=schemas.RideBookResponse)
 def schedule_ride(
     ride_data: schemas.RideScheduleCreate,
     current_gucian: models.Gucian = Depends(auth.get_current_gucian),
@@ -167,11 +168,31 @@ def update_location(lat: float, lng: float, current_car: models.Car = Depends(au
     return CarService.update_location(current_car, lat, lng, db)
 
 
-@app.post("/rides/{ride_id}/verify", response_model=schemas.RideResponse)
-def verify_ride(
+@app.post("/cars/verify-code")
+def car_verify_code(
     ride_id: int,
     code: str,
-    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    current_car: models.Car = Depends(auth.get_current_car),
     db: Session = Depends(get_db),
 ):
-    return VerificationService.verify_code(ride_id, code, current_gucian, db)
+    return VerificationService.verify_code(ride_id, code, current_car, db)
+
+@app.get("/cars/status-check")
+def status_check(current_car: models.Car = Depends(auth.get_current_car), db: Session = Depends(get_db)):
+    car = GraceHelper.check_and_expire_grace(current_car, db)
+    return {"status": car.status}
+
+@app.get("/cars/current")
+def get_current(current_car: models.Car = Depends(auth.get_current_car), db: Session = Depends(get_db)):
+    if not current_car.current_group_id:
+        return {"status": current_car.status, "group": None}
+    group = db.query(models.RideGroup).filter(models.RideGroup.id == current_car.current_group_id).first()
+    rides = db.query(models.Ride).filter(models.Ride.group_id == current_car.current_group_id).all()
+    return {
+        "status": current_car.status,
+        "group_id": group.id,
+        "pickup_location_id": group.pickup_location_id,
+        "destination_location_id": group.destination_location_id,
+        "passenger_total": group.passenger_total,
+        "ride_ids": [r.id for r in rides],
+    }

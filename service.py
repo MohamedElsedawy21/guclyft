@@ -22,31 +22,49 @@ ACTIVE_STATUSES = ('queued', 'en_route', 'arrived', 'in_progress')
 CAR_CAPACITY = 4
 
 
-def find_or_create_group(db: Session, pickup_location_id: int, destination_location_id: int, passenger_count: int):
+def find_or_create_group(
+    db: Session,
+    pickup_location_id: int,
+    destination_location_id: int,
+    passenger_count: int,
+    scheduled_time=None,
+):
     """
-    Carpool matching, run at request time (when a new ride is booked).
+    Carpool matching, run at request time (when a new ride is booked or scheduled).
 
-    Looks for an existing, unlocked ride_group with the SAME pickup and
-    SAME destination that still has room for `passenger_count` more
-    passengers (capacity = CAR_CAPACITY). If found, the new ride joins
-    that group. Otherwise, a brand new group is created (size 1 for now
-    — every ride belongs to a group, even solo riders).
+    Live rides (scheduled_time=None) only match with other live, unmatched
+    groups for the same pickup/destination.
 
-    NOTE: this doesn't currently re-check whether the matched group's
-    existing ride(s) got cancelled in the meantime — a cancellation flow
-    should also shrink/clear the group's passenger_total when built.
+    Scheduled rides only match with other scheduled rides for the same
+    pickup/destination AND within a small time window of each other
+    (default: 10 minutes) — so a 9:00am and 9:05am request can share a
+    car, but a 9:00am and 2:00pm request won't.
     """
-    candidate = (
-        db.query(models.RideGroup)
-        .filter(
-            models.RideGroup.pickup_location_id == pickup_location_id,
-            models.RideGroup.destination_location_id == destination_location_id,
-            models.RideGroup.locked == False,
-            models.RideGroup.passenger_total + passenger_count <= CAR_CAPACITY,
-        )
-        .order_by(models.RideGroup.created_at.asc())
-        .first()
+    TIME_WINDOW_MINUTES = 10
+
+    query = db.query(models.RideGroup).filter(
+        models.RideGroup.pickup_location_id == pickup_location_id,
+        models.RideGroup.destination_location_id == destination_location_id,
+        models.RideGroup.locked == False,
+        models.RideGroup.passenger_total + passenger_count <= CAR_CAPACITY,
     )
+
+    if scheduled_time is None:
+        # live ride — only match groups whose rides are ALSO live (no scheduled_time)
+        query = query.join(models.Ride, models.Ride.group_id == models.RideGroup.id).filter(
+            models.Ride.scheduled_time.is_(None)
+        )
+    else:
+        # scheduled ride — only match groups whose rides are scheduled within the time window
+        window_start = scheduled_time - timedelta(minutes=TIME_WINDOW_MINUTES)
+        window_end = scheduled_time + timedelta(minutes=TIME_WINDOW_MINUTES)
+        query = query.join(models.Ride, models.Ride.group_id == models.RideGroup.id).filter(
+            models.Ride.scheduled_time.isnot(None),
+            models.Ride.scheduled_time >= window_start,
+            models.Ride.scheduled_time <= window_end,
+        )
+
+    candidate = query.order_by(models.RideGroup.created_at.asc()).first()
 
     if candidate:
         candidate.passenger_total += passenger_count
@@ -60,9 +78,8 @@ def find_or_create_group(db: Session, pickup_location_id: int, destination_locat
         locked=False,
     )
     db.add(new_group)
-    db.flush()  # assigns new_group.id without committing yet
+    db.flush()
     return new_group
-
 
 def get_queue_position(db: Session, ride_id: int):
     """
@@ -124,7 +141,6 @@ def get_queue_position(db: Session, ride_id: int):
 class GraceHelper:
     @staticmethod
     def check_and_expire_grace(car: models.Car, db: Session):
-        """If the car is 'arrived' and grace period has passed, mark rides no_show and free the car."""
         if car.status != "arrived" or not car.current_group_id:
             return car
 
@@ -133,20 +149,21 @@ class GraceHelper:
             return car
 
         now = datetime.now(timezone.utc)
-        # all rides in a group share the same arrival/grace window, so check the first
-        if rides[0].grace_expires_at and rides[0].grace_expires_at < now:
+        grace_expires_at = rides[0].grace_expires_at
+        if grace_expires_at and grace_expires_at.tzinfo is None:
+            grace_expires_at = grace_expires_at.replace(tzinfo=timezone.utc)
+
+        if grace_expires_at and grace_expires_at < now:
             for r in rides:
                 if r.status == "arrived":
                     r.status = "no_show"
-
-            group = db.query(models.RideGroup).filter(models.RideGroup.id == car.current_group_id).first()
 
             car.status = "idle"
             car.current_group_id = None
             db.commit()
             db.refresh(car)
 
-        return car
+        return carv  
 
 class PriorityHelper:
     @staticmethod
@@ -363,8 +380,8 @@ class RideService:
             pickup_location_id=ride_data.pickup_location_id,
             destination_location_id=ride_data.destination_location_id,
             passenger_count=ride_data.passenger_count,
+            scheduled_time=ride_data.scheduled_time,
         )
-
         new_ride = models.Ride(
             user_id=current_gucian.id,
             pickup_location_id=ride_data.pickup_location_id,
@@ -407,21 +424,58 @@ class RideService:
     def schedule_ride(ride_data: schemas.RideScheduleCreate, current_gucian: models.Gucian, db: Session):
         current_gucian = PriorityHelper.check_and_expire(current_gucian, db)
 
-        pickup = db.query(models.Location).filter(models.Location.id == ride_data.pickup_location_id).first()
-        destination = db.query(models.Location).filter(models.Location.id == ride_data.destination_location_id).first()
-
-        if not pickup or not destination:
-            raise HTTPException(status_code=404, detail="Pickup or destination location not found")
-
-        if pickup.id == destination.id:
+        if ride_data.pickup_location_id == ride_data.destination_location_id:
             raise HTTPException(status_code=400, detail="Pickup and destination cannot be the same")
 
+        pickup_row = db.execute(
+            text("SELECT name FROM locations WHERE id = :id"),
+            {"id": ride_data.pickup_location_id}
+        ).fetchone()
+        dropoff_row = db.execute(
+            text("SELECT name FROM locations WHERE id = :id"),
+            {"id": ride_data.destination_location_id}
+        ).fetchone()
+
+        if pickup_row is None:
+            raise HTTPException(status_code=404, detail="Pickup location not found")
+        if dropoff_row is None:
+            raise HTTPException(status_code=404, detail="Destination location not found")
+
+        pickup_name = pickup_row.name
+        dropoff_name = dropoff_row.name
+
+        if pickup_name not in graph:
+            raise HTTPException(status_code=400, detail=f"Location '{pickup_name}' exists but has no route data")
+        if dropoff_name not in graph:
+            raise HTTPException(status_code=400, detail=f"Location '{dropoff_name}' exists but has no route data")
+
+        route_result = get_route(graph, coords, pickup_name, dropoff_name)
+        if route_result["path"] is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No route found between '{pickup_name}' and '{dropoff_name}'"
+            )
+
         verification_code = ''.join(random.choices(string.digits, k=4))
+
+        # Scheduled rides are grouped too, but only with OTHER scheduled rides
+        # for the same pickup/destination/time — grouping with live "now" rides
+        # wouldn't make sense since they're not happening at the same moment.
+        # For now, treat each scheduled ride as its own group (size 1), same as
+        # before, but with the group_id set so it flows through the same car
+        # assignment logic later.
+        group = find_or_create_group(
+            db,
+            pickup_location_id=ride_data.pickup_location_id,
+            destination_location_id=ride_data.destination_location_id,
+            passenger_count=ride_data.passenger_count,
+        )
 
         new_ride = models.Ride(
             user_id=current_gucian.id,
             pickup_location_id=ride_data.pickup_location_id,
             destination_location_id=ride_data.destination_location_id,
+            group_id=group.id,
             status="queued",
             is_priority=current_gucian.is_priority,
             is_prebooked=True,
@@ -434,7 +488,26 @@ class RideService:
         db.commit()
         db.refresh(new_ride)
 
-        return new_ride
+        position, total_active = get_queue_position(db, new_ride.id)
+
+        return {
+            "id": new_ride.id,
+            "user_id": new_ride.user_id,
+            "pickup_location_id": new_ride.pickup_location_id,
+            "destination_location_id": new_ride.destination_location_id,
+            "status": new_ride.status,
+            "is_priority": new_ride.is_priority,
+            "is_prebooked": new_ride.is_prebooked,
+            "scheduled_time": new_ride.scheduled_time,
+            "passenger_count": new_ride.passenger_count,
+            "verification_code": new_ride.verification_code,
+            "created_at": new_ride.created_at,
+            "route": route_result,
+            "queue_position": position,
+            "total_active_rides": total_active,
+            "group_id": new_ride.group_id,
+            "group_size": group.passenger_total,
+        }
 
 class LocationService:
 
@@ -653,12 +726,13 @@ class CarService:
 class VerificationService:
 
     @staticmethod
-    def verify_code(ride_id: int, code: str, gucian: models.Gucian, db: Session):
+    def verify_code(ride_id: int, code: str, car: models.Car, db: Session):
         ride = db.query(models.Ride).filter(models.Ride.id == ride_id).first()
         if not ride:
             raise HTTPException(status_code=404, detail="Ride not found")
-        if ride.user_id != gucian.id:
-            raise HTTPException(status_code=403, detail="This isn't your ride")
+
+        if ride.group_id != car.current_group_id:
+            raise HTTPException(status_code=403, detail="This ride isn't part of your current trip")
 
         if ride.status == "no_show":
             raise HTTPException(status_code=400, detail="Grace period expired — ride marked as no-show")
@@ -667,7 +741,11 @@ class VerificationService:
             raise HTTPException(status_code=400, detail="Ride is not ready for verification")
 
         now = datetime.now(timezone.utc)
-        if ride.grace_expires_at and ride.grace_expires_at < now:
+        grace_expires_at = ride.grace_expires_at
+        if grace_expires_at and grace_expires_at.tzinfo is None:
+            grace_expires_at = grace_expires_at.replace(tzinfo=timezone.utc)
+
+        if grace_expires_at and grace_expires_at < now:
             ride.status = "no_show"
             db.commit()
             raise HTTPException(status_code=400, detail="Grace period expired — ride marked as no-show")
@@ -676,8 +754,6 @@ class VerificationService:
             raise HTTPException(status_code=400, detail="Incorrect verification code")
 
         ride.verified_at = now
-        # NOTE: individual ride status stays "arrived" until the whole group is verified —
-        # only flips to "in_progress" once every rider in the group has verified.
         db.commit()
 
         # check if every ride in this group has now been verified
@@ -685,17 +761,17 @@ class VerificationService:
         still_waiting = [r for r in group_rides if r.status == "arrived" and r.verified_at is None]
 
         if not still_waiting:
-            # everyone verified — start the trip for the whole group
             for r in group_rides:
                 if r.status == "arrived":
                     r.status = "in_progress"
                     r.started_at = now
-
-            car = db.query(models.Car).filter(models.Car.current_group_id == ride.group_id).first()
-            if car:
-                car.status = "in_progress"
-
+            car.status = "in_progress"
             db.commit()
 
         db.refresh(ride)
-        return ride
+        return {
+            "ride_id": ride.id,
+            "verified": True,
+            "all_verified": not still_waiting,
+            "still_waiting_ride_ids": [r.id for r in still_waiting],
+        }

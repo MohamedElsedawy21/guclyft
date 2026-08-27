@@ -6,6 +6,7 @@ import 'signup_screen.dart';
 import 'gucian_shell.dart';
 import 'admin_home_screen.dart';
 import 'forgot_password_screen.dart';
+import 'car_home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -37,10 +38,15 @@ class _LoginScreenState extends State<LoginScreen> {
         context,
         MaterialPageRoute(builder: (_) => AdminHomeScreen(name: result.name)),
       );
+    } else if (result.role == "car") {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => CarHomeScreen(name: result.name)),
+      );
     } else {
       Navigator.pushReplacement(
         context,
-          MaterialPageRoute(builder: (_) => GucianShell(name: result.name)),
+        MaterialPageRoute(builder: (_) => GucianShell(name: result.name)),
       );
     }
   } catch (e) {

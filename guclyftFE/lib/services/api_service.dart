@@ -60,4 +60,14 @@ class ApiService {
     final headers = auth ? await authHeaders() : {"Content-Type": "application/json"};
     return http.put(Uri.parse("$baseUrl$path"), headers: headers, body: jsonEncode(body));
   }
+    static Future<http.Response> putQuery(String path, Map<String, String> queryParams, {bool auth = false}) async {
+    final headers = auth ? await authHeaders() : {"Content-Type": "application/json"};
+    final uri = Uri.parse("$baseUrl$path").replace(queryParameters: queryParams);
+    return http.put(uri, headers: headers);
+  }
+    static Future<http.Response> postQuery(String path, Map<String, String> queryParams, {bool auth = false}) async {
+    final headers = auth ? await authHeaders() : {"Content-Type": "application/json"};
+    final uri = Uri.parse("$baseUrl$path").replace(queryParameters: queryParams);
+    return http.post(uri, headers: headers);
+  }
 }

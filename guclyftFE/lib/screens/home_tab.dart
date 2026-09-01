@@ -4,6 +4,8 @@ import '../services/ride_service.dart';
 import '../services/location_service.dart';
 import '../widgets/campus_map.dart';
 import '../services/send_item_service.dart';
+import 'live_ride_screen.dart';
+
 enum _Mode { book, schedule, sendItem }
 
 class HomeTab extends StatefulWidget {
@@ -25,7 +27,8 @@ class _HomeTabState extends State<HomeTab> {
   int _passengerCount = 1;
   DateTime? _scheduledTime;
   final _itemDescController = TextEditingController();
-
+  bool _checkingActiveRide = true;
+  int? _activeRideId;
   bool _submitting = false;
   String? _error;
   Map<String, dynamic>? _result;
@@ -33,7 +36,20 @@ class _HomeTabState extends State<HomeTab> {
   @override
   void initState() {
     super.initState();
+    _checkActiveRide();
     _loadLocations();
+  }
+
+  Future<void> _checkActiveRide() async {
+    try {
+      final result = await RideService.getActiveRide();
+      setState(() {
+        _activeRideId = result['active'] == true ? result['ride_id'] : null;
+        _checkingActiveRide = false;
+      });
+    } catch (_) {
+      setState(() => _checkingActiveRide = false);
+    }
   }
 
   Future<void> _loadLocations() async {
@@ -161,22 +177,30 @@ class _HomeTabState extends State<HomeTab> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text("Guclyft")),
-      body: _loadingLocations
+      body: _checkingActiveRide
           ? const Center(child: CircularProgressIndicator())
-          : _loadError != null
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(_loadError!, style: const TextStyle(color: AppColors.error)),
-                      const SizedBox(height: 12),
-                      ElevatedButton(onPressed: _loadLocations, child: const Text("Retry")),
-                    ],
-                  ),
+          : _activeRideId != null
+              ? LiveRideScreen(
+                  rideId: _activeRideId!,
+                  embedded: true,
+                  onRideFinished: () => setState(() => _activeRideId = null),
                 )
-              : _result != null
-                  ? _buildConfirmation()
-                  : _buildForm(),
+              : _loadingLocations
+                  ? const Center(child: CircularProgressIndicator())
+                  : _loadError != null
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(_loadError!, style: const TextStyle(color: AppColors.error)),
+                              const SizedBox(height: 12),
+                              ElevatedButton(onPressed: _loadLocations, child: const Text("Retry")),
+                            ],
+                          ),
+                        )
+                      : _result != null
+                          ? _buildConfirmation()
+                          : _buildForm(),
     );
   }
 
@@ -302,6 +326,13 @@ class _HomeTabState extends State<HomeTab> {
           if (_mode == _Mode.schedule)
             Text("Scheduled for: ${_result!['scheduled_time']}"),
           const SizedBox(height: 24),
+                   if (_mode != _Mode.sendItem) ...[
+            ElevatedButton(
+              onPressed: () => setState(() => _activeRideId = _result!['id']),
+              child: const Text("Track My Ride"),
+            ),
+            const SizedBox(height: 12),
+          ],
           ElevatedButton(onPressed: _resetForm, child: const Text("Book Another")),
         ],
       ),

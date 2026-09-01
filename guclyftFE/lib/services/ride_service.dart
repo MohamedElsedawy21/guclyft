@@ -22,6 +22,24 @@ class RideService {
     }
   }
 
+    static Future<Map<String, dynamic>> getActiveRide() async {
+    final res = await ApiService.get("/rides/mine/active", auth: true);
+    if (res.statusCode == 200) {
+      return jsonDecode(res.body);
+    } else {
+      throw Exception("Failed to check active ride");
+    }
+  }
+
+  static Future<Map<String, dynamic>> getLiveStatus(int rideId) async {
+    final res = await ApiService.get("/rides/$rideId/live", auth: true);
+    if (res.statusCode == 200) {
+      return jsonDecode(res.body);
+    } else {
+      throw Exception("Failed to load live status");
+    }
+  }
+
   static Future<Map<String, dynamic>> scheduleRide({
     required int pickupLocationId,
     required int destinationLocationId,
@@ -40,6 +58,15 @@ class RideService {
     } else {
       final error = jsonDecode(res.body);
       throw Exception(error['detail'] ?? "Scheduling failed");
+    }
+  }
+    static Future<Map<String, dynamic>> cancelRide(int rideId) async {
+    final res = await ApiService.put("/rides/$rideId/cancel", {}, auth: true);
+    if (res.statusCode == 200) {
+      return jsonDecode(res.body);
+    } else {
+      final error = jsonDecode(res.body);
+      throw Exception(error['detail'] ?? "Failed to cancel ride");
     }
   }
 }

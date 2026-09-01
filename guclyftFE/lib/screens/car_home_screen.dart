@@ -5,6 +5,7 @@ import '../services/api_service.dart';
 import '../services/car_service.dart';
 import '../services/location_service.dart';
 import 'login_screen.dart';
+import 'package:geolocator/geolocator.dart';
 
 class CarHomeScreen extends StatefulWidget {
   final String name;
@@ -16,6 +17,7 @@ class CarHomeScreen extends StatefulWidget {
 
 class _CarHomeScreenState extends State<CarHomeScreen> {
   Timer? _pollTimer;
+  Timer? _locationTimer;
   String _status = "idle";
   Map<String, dynamic>? _currentGroup;
   Map<int, String> _locationNames = {};
@@ -35,6 +37,37 @@ class _CarHomeScreenState extends State<CarHomeScreen> {
     await _loadLocationNames();
     await _loadCurrentStatus();
     _startPolling();
+  }
+
+
+  Future<void> _requestLocationPermission() async {
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.deniedForever) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Location permission is required for live tracking")),
+        );
+      }
+    }
+  }
+
+  void _startLocationUpdates() {
+    _locationTimer?.cancel();
+    _locationTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+      if (_status == "en_route" || _status == "in_progress") {
+        try {
+          final position = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.high,
+          );
+          await CarService.updateLocation(position.latitude, position.longitude);
+        } catch (_) {
+          // silent — will retry on next tick
+        }
+      }
+    });
   }
 
   Future<void> _loadLocationNames() async {
@@ -197,6 +230,7 @@ class _CarHomeScreenState extends State<CarHomeScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _locationTimer?.cancel();
     for (var c in _codeControllers.values) {
       c.dispose();
     }

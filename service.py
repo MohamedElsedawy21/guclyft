@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi_mail import FastMail, MessageSchema, MessageType
 from config import mail_config
 from datetime import datetime, timedelta, timezone
-from routing import graph, coords, get_route
+from routing import graph, coords, get_route, distance_to_eta
+from math import radians, sin, cos, sqrt, atan2 as _atan2  # if not already imported from routing
 
 UPLOAD_DIR = "uploads/medical_docs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -21,7 +22,75 @@ ACTIVE_STATUSES = ('queued', 'en_route', 'arrived', 'in_progress')
 
 CAR_CAPACITY = 4
 
+def _haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    dlat, dlon = radians(lat2 - lat1), radians(lon2 - lon1)
+    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+    return 2 * R * atan2(sqrt(a), sqrt(1 - a))
 
+
+class LiveTrackingService:
+
+    @staticmethod
+    def get_live_status(ride_id: int, gucian: models.Gucian, db: Session):
+        ride = db.query(models.Ride).filter(models.Ride.id == ride_id).first()
+        if not ride:
+            raise HTTPException(status_code=404, detail="Ride not found")
+        if ride.user_id != gucian.id:
+            raise HTTPException(status_code=403, detail="This isn't your ride")
+
+        pickup_row = db.execute(text("SELECT name FROM locations WHERE id = :id"), {"id": ride.pickup_location_id}).fetchone()
+        dest_row = db.execute(text("SELECT name FROM locations WHERE id = :id"), {"id": ride.destination_location_id}).fetchone()
+
+        pickup_name = pickup_row.name
+        dest_name = dest_row.name
+        pickup_coords = coords.get(pickup_name)
+        dest_coords = coords.get(dest_name)
+
+        car = None
+        if ride.group_id:
+            car = db.query(models.Car).filter(models.Car.current_group_id == ride.group_id).first()
+
+        response = {
+            "ride_id": ride.id,
+            "status": ride.status,
+            "pickup": {"name": pickup_name, "lat": pickup_coords[0], "lng": pickup_coords[1]} if pickup_coords else None,
+            "destination": {"name": dest_name, "lat": dest_coords[0], "lng": dest_coords[1]} if dest_coords else None,
+            "car": {"lat": car.current_lat, "lng": car.current_lng} if car and car.current_lat else None,
+            "eta_minutes": None,
+            "path": [],
+            "grace_expires_at": ride.grace_expires_at,
+            "departure_deadline": ride.departure_deadline,
+            "verification_code": ride.verification_code,
+        }
+
+        if ride.status == "queued":
+            if pickup_coords and dest_coords:
+                result = get_route(graph, coords, pickup_name, dest_name)
+                if result["path"]:
+                    response["path"] = [list(coords[n]) for n in result["path"]]
+
+        elif ride.status == "en_route":
+            if car and car.current_lat and pickup_coords:
+                response["path"] = [[car.current_lat, car.current_lng], list(pickup_coords)]
+                dist = _haversine(car.current_lat, car.current_lng, pickup_coords[0], pickup_coords[1])
+                response["eta_minutes"] = round(distance_to_eta(dist), 1)
+
+        elif ride.status == "arrived":
+            response["path"] = [list(pickup_coords)] if pickup_coords else []
+
+        elif ride.status == "in_progress":
+            if pickup_coords and dest_coords:
+                result = get_route(graph, coords, pickup_name, dest_name)
+                if result["path"]:
+                    response["path"] = [list(coords[n]) for n in result["path"]]
+                    response["eta_minutes"] = result["eta_minutes"]
+
+        elif ride.status == "completed":
+            response["path"] = []
+
+        return response
+    
 def find_or_create_group(
     db: Session,
     pickup_location_id: int,
@@ -421,6 +490,33 @@ class RideService:
         }
 
     @staticmethod
+    def get_active_ride(gucian: models.Gucian, db: Session):
+        """Returns the gucian's current active/just-finished ride, or None."""
+        ride = (
+            db.query(models.Ride)
+            .filter(
+                models.Ride.user_id == gucian.id,
+                models.Ride.status.in_(["queued", "en_route", "arrived", "in_progress", "completed"]),
+            )
+            .order_by(models.Ride.created_at.desc())
+            .first()
+        )
+
+        if not ride:
+            return None
+
+        # "completed" only counts as active while the departure window hasn't closed yet
+        if ride.status == "completed":
+            now = datetime.now(timezone.utc)
+            deadline = ride.departure_deadline
+            if deadline and deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if not deadline or deadline < now:
+                return None
+
+        return ride
+    
+    @staticmethod
     def schedule_ride(ride_data: schemas.RideScheduleCreate, current_gucian: models.Gucian, db: Session):
         current_gucian = PriorityHelper.check_and_expire(current_gucian, db)
 
@@ -508,7 +604,99 @@ class RideService:
             "group_id": new_ride.group_id,
             "group_size": group.passenger_total,
         }
+    @staticmethod
+    def cancel_ride(ride_id: int, gucian: models.Gucian, db: Session):
+        ride = db.query(models.Ride).filter(models.Ride.id == ride_id).first()
+        if not ride:
+            raise HTTPException(status_code=404, detail="Ride not found")
+        if ride.user_id != gucian.id:
+            raise HTTPException(status_code=403, detail="This isn't your ride")
 
+        if ride.status not in ("queued", "en_route"):
+            raise HTTPException(
+                status_code=400,
+                detail="This ride can no longer be cancelled (car has arrived or trip already started)"
+            )
+
+        was_en_route = ride.status == "en_route"
+
+        ride.status = "cancelled"
+        ride.completed_at = datetime.now(timezone.utc)
+
+        group = db.query(models.RideGroup).filter(models.RideGroup.id == ride.group_id).first()
+        message = "Ride cancelled"
+
+        if group:
+            group.passenger_total = max(0, group.passenger_total - ride.passenger_count)
+
+            other_active = db.query(models.Ride).filter(
+                models.Ride.group_id == group.id,
+                models.Ride.id != ride.id,
+                models.Ride.status.in_(("queued", "en_route")),
+            ).count()
+
+            if other_active == 0:
+                # this was the only rider left — free the car so it can grab its next ride
+                if group.assigned_car_id:
+                    car = db.query(models.Car).filter(models.Car.id == group.assigned_car_id).first()
+                    if car and car.current_group_id == group.id:
+                        car.status = "idle"
+                        car.current_group_id = None
+                group.locked = True
+                message = "Ride cancelled — car freed up for its next ride"
+
+            elif was_en_route and group.locked:
+                # riders remain and a car is already en route — backfill the freed
+                # seat(s) from the queue instead of leaving them empty for the trip.
+                freed_seats = CAR_CAPACITY - group.passenger_total
+
+                if freed_seats > 0:
+                    backfill_candidates = (
+                        db.query(models.Ride)
+                        .filter(
+                            models.Ride.status == "queued",
+                            models.Ride.pickup_location_id == group.pickup_location_id,
+                            models.Ride.destination_location_id == group.destination_location_id,
+                            models.Ride.passenger_count <= freed_seats,
+                        )
+                        .order_by(models.Ride.is_priority.desc(), models.Ride.created_at.asc())
+                        .all()
+                    )
+
+                    filled_names = []
+                    for candidate in backfill_candidates:
+                        if candidate.passenger_count > freed_seats:
+                            continue
+
+                        old_group = db.query(models.RideGroup).filter(
+                            models.RideGroup.id == candidate.group_id
+                        ).first()
+
+                        candidate.group_id = group.id
+                        candidate.status = "en_route"  # car is already en route to this pickup
+                        group.passenger_total += candidate.passenger_count
+                        freed_seats -= candidate.passenger_count
+
+                        if old_group and old_group.id != group.id:
+                            old_group.passenger_total = max(
+                                0, old_group.passenger_total - candidate.passenger_count
+                            )
+
+                        filled_names.append(candidate.id)
+                        if freed_seats <= 0:
+                            break
+
+                    if filled_names:
+                        message = f"Ride cancelled — backfilled seat(s) with ride(s) {filled_names}"
+
+        db.commit()
+        db.refresh(ride)
+
+        return {
+            "ride_id": ride.id,
+            "status": ride.status,
+            "message": message,
+        }
 class LocationService:
 
     @staticmethod
@@ -704,9 +892,11 @@ class CarService:
 
         rides = db.query(models.Ride).filter(models.Ride.group_id == car.current_group_id).all()
         now = datetime.now(timezone.utc)
+        deadline = now + timedelta(seconds=90)
         for r in rides:
             r.status = "completed"
             r.completed_at = now
+            r.departure_deadline = deadline
 
         group = db.query(models.RideGroup).filter(models.RideGroup.id == car.current_group_id).first()
 
@@ -714,7 +904,7 @@ class CarService:
         car.current_group_id = None
         db.commit()
 
-        return {"message": "Ride completed", "group_id": group.id}
+        return {"message": "Ride completed", "group_id": group.id, "departure_deadline": deadline}
 
     @staticmethod
     def update_location(car: models.Car, lat: float, lng: float, db: Session):
@@ -774,4 +964,80 @@ class VerificationService:
             "verified": True,
             "all_verified": not still_waiting,
             "still_waiting_ride_ids": [r.id for r in still_waiting],
+        }
+class RatingService:
+
+    @staticmethod
+    def submit_rating(ride_id: int, rating_data: schemas.RatingCreate, gucian: models.Gucian, db: Session):
+        ride = db.query(models.Ride).filter(models.Ride.id == ride_id).first()
+        if not ride:
+            raise HTTPException(status_code=404, detail="Ride not found")
+        if ride.user_id != gucian.id:
+            raise HTTPException(status_code=403, detail="This isn't your ride")
+        if ride.status != "completed":
+            raise HTTPException(status_code=400, detail="Only completed rides can be rated")
+
+        existing = db.query(models.RatingFeedback).filter(models.RatingFeedback.ride_id == ride_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="This ride has already been rated")
+
+        new_rating = models.RatingFeedback(
+            ride_id=ride_id,
+            gucian_id=gucian.id,
+            stars=rating_data.stars,
+            smoothness=rating_data.smoothness,
+            punctuality=rating_data.punctuality,
+            cleanliness=rating_data.cleanliness,
+            comment=rating_data.comment,
+        )
+        db.add(new_rating)
+        db.commit()
+        db.refresh(new_rating)
+        return new_rating
+
+    @staticmethod
+    def get_for_ride(ride_id: int, gucian: models.Gucian, db: Session):
+        ride = db.query(models.Ride).filter(models.Ride.id == ride_id).first()
+        if not ride or ride.user_id != gucian.id:
+            raise HTTPException(status_code=404, detail="Ride not found")
+
+        rating = db.query(models.RatingFeedback).filter(models.RatingFeedback.ride_id == ride_id).first()
+        return rating  # may be None — frontend treats that as "not yet rated"
+
+    @staticmethod
+    def get_all_for_admin(db: Session):
+        ratings = db.query(models.RatingFeedback).order_by(models.RatingFeedback.created_at.desc()).all()
+        return [
+            schemas.RatingAdminView(
+                id=r.id,
+                ride_id=r.ride_id,
+                gucian_name=f"{r.gucian.firstname} {r.gucian.lastname}",
+                stars=r.stars,
+                smoothness=r.smoothness,
+                punctuality=r.punctuality,
+                cleanliness=r.cleanliness,
+                comment=r.comment,
+                created_at=r.created_at,
+            )
+            for r in ratings
+        ]
+
+    @staticmethod
+    def get_summary(db: Session):
+        result = db.execute(text("""
+            SELECT
+                COUNT(*) as total,
+                AVG(stars) as avg_stars,
+                AVG(smoothness) as avg_smoothness,
+                AVG(punctuality) as avg_punctuality,
+                AVG(cleanliness) as avg_cleanliness
+            FROM ratings_feedback
+        """)).fetchone()
+
+        return {
+            "total_ratings": result.total or 0,
+            "average_stars": round(result.avg_stars, 2) if result.avg_stars else None,
+            "average_smoothness": round(result.avg_smoothness, 2) if result.avg_smoothness else None,
+            "average_punctuality": round(result.avg_punctuality, 2) if result.avg_punctuality else None,
+            "average_cleanliness": round(result.avg_cleanliness, 2) if result.avg_cleanliness else None,
         }

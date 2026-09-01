@@ -19,6 +19,9 @@ from service import SendItemService
 from service import CarService
 from service import GraceHelper
 from service import VerificationService
+from service import LiveTrackingService
+from service import RatingService
+from typing import Optional
 
 Base.metadata.create_all(bind=engine)
 
@@ -196,3 +199,65 @@ def get_current(current_car: models.Car = Depends(auth.get_current_car), db: Ses
         "passenger_total": group.passenger_total,
         "ride_ids": [r.id for r in rides],
     }
+
+@app.get("/rides/{ride_id}/live")
+def get_ride_live_status(
+    ride_id: int,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return LiveTrackingService.get_live_status(ride_id, current_gucian, db)
+
+@app.get("/rides/mine/active")
+def get_active_ride(
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    ride = RideService.get_active_ride(current_gucian, db)
+    if not ride:
+        return {"active": False}
+    return {"active": True, "ride_id": ride.id, "status": ride.status}
+
+@app.put("/rides/{ride_id}/cancel", response_model=schemas.RideCancelResponse)
+def cancel_ride(
+    ride_id: int,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return RideService.cancel_ride(ride_id, current_gucian, db)
+
+
+
+@app.post("/rides/{ride_id}/rate", response_model=schemas.RatingResponse)
+def rate_ride(
+    ride_id: int,
+    rating_data: schemas.RatingCreate,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return RatingService.submit_rating(ride_id, rating_data, current_gucian, db)
+
+
+@app.get("/rides/{ride_id}/rating", response_model=Optional[schemas.RatingResponse])
+def get_ride_rating(
+    ride_id: int,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return RatingService.get_for_ride(ride_id, current_gucian, db)
+
+
+@app.get("/admin/ratings", response_model=list[schemas.RatingAdminView])
+def get_all_ratings(
+    current_admin: models.Admin = Depends(auth.get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return RatingService.get_all_for_admin(db)
+
+
+@app.get("/admin/ratings/summary")
+def get_ratings_summary(
+    current_admin: models.Admin = Depends(auth.get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return RatingService.get_summary(db)

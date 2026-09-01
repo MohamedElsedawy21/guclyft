@@ -84,6 +84,8 @@ class Ride(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    departure_deadline = Column(DateTime(timezone=True), nullable=True)
+
     __table_args__ = (
         CheckConstraint(
             "status IN ('queued','en_route','arrived','in_progress','completed','cancelled','no_show')",
@@ -174,3 +176,25 @@ class Car(Base):
             name="valid_car_status"
         ),
     )
+class RatingFeedback(Base):
+    __tablename__ = "ratings_feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ride_id = Column(Integer, ForeignKey("rides.id"), unique=True, nullable=False)
+    gucian_id = Column(String(50), ForeignKey("gucians.id"), nullable=False)
+    stars = Column(Integer, nullable=False)
+    smoothness = Column(Integer, nullable=True)
+    punctuality = Column(Integer, nullable=True)
+    cleanliness = Column(Integer, nullable=True)
+    comment = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("stars BETWEEN 1 AND 5", name="valid_stars"),
+        CheckConstraint("smoothness IS NULL OR smoothness BETWEEN 1 AND 5", name="valid_smoothness"),
+        CheckConstraint("punctuality IS NULL OR punctuality BETWEEN 1 AND 5", name="valid_punctuality"),
+        CheckConstraint("cleanliness IS NULL OR cleanliness BETWEEN 1 AND 5", name="valid_cleanliness"),
+    )
+
+    ride = relationship("Ride", foreign_keys=[ride_id])
+    gucian = relationship("Gucian", foreign_keys=[gucian_id])

@@ -201,3 +201,47 @@ class SendItemResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class RideCancelResponse(BaseModel):
+    ride_id: int
+    status: str
+    message: str
+
+class RatingCreate(BaseModel):
+    stars: int
+    smoothness: Optional[int] = None
+    punctuality: Optional[int] = None
+    cleanliness: Optional[int] = None
+    comment: Optional[str] = None
+
+    @field_validator("stars", "smoothness", "punctuality", "cleanliness")
+    @classmethod
+    def validate_range(cls, v):
+        if v is not None and (v < 1 or v > 5):
+            raise ValueError("Rating values must be between 1 and 5")
+        return v
+
+class RatingResponse(BaseModel):
+    id: int
+    ride_id: int
+    gucian_id: str
+    stars: int
+    smoothness: Optional[int] = None
+    punctuality: Optional[int] = None
+    cleanliness: Optional[int] = None
+    comment: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class RatingAdminView(BaseModel):
+    id: int
+    ride_id: int
+    gucian_name: str
+    stars: int
+    smoothness: Optional[int] = None
+    punctuality: Optional[int] = None
+    cleanliness: Optional[int] = None
+    comment: Optional[str] = None
+    created_at: datetime

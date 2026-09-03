@@ -22,6 +22,8 @@ from service import VerificationService
 from service import LiveTrackingService
 from service import RatingService
 from typing import Optional
+from service import SendItemLiveService
+from service import ActiveStatusService
 
 Base.metadata.create_all(bind=engine)
 
@@ -268,3 +270,19 @@ def get_ratings_summary(
     db: Session = Depends(get_db),
 ):
     return RatingService.get_summary(db)
+
+@app.get("/send-items/{item_id}/live")
+def get_item_live_status(
+    item_id: int,
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return SendItemLiveService.get_live_status(item_id, current_gucian, db)
+
+
+@app.get("/active-status")
+def get_active_status(
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return ActiveStatusService.get_active(current_gucian, db)

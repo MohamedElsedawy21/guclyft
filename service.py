@@ -491,7 +491,6 @@ class RideService:
 
     @staticmethod
     def get_active_ride(gucian: models.Gucian, db: Session):
-        """Returns the gucian's current active/just-finished ride, or None."""
         ride = (
             db.query(models.Ride)
             .filter(
@@ -505,13 +504,21 @@ class RideService:
         if not ride:
             return None
 
-        # "completed" only counts as active while the departure window hasn't closed yet
+        now = datetime.now(timezone.utc)
+
         if ride.status == "completed":
-            now = datetime.now(timezone.utc)
             deadline = ride.departure_deadline
             if deadline and deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
             if not deadline or deadline < now:
+                return None
+
+        # scheduled rides only "go active" 5 minutes before their time
+        if ride.is_prebooked and ride.scheduled_time and ride.status == "queued":
+            sched = ride.scheduled_time
+            if sched.tzinfo is None:
+                sched = sched.replace(tzinfo=timezone.utc)
+            if sched - now > timedelta(minutes=5):
                 return None
 
         return ride
@@ -832,13 +839,23 @@ class SendItemService:
             if not recipient:
                 raise HTTPException(status_code=404, detail="Recipient not found")
 
+        # Items don't take up passenger seats, so pass 0 for capacity purposes —
+        # they join any live (non-scheduled) group matching pickup/destination.
+        group = find_or_create_group(
+            db,
+            pickup_location_id=item_data.pickup_location_id,
+            destination_location_id=item_data.dropoff_location_id,
+            passenger_count=0,
+        )
+
         new_item = models.SendItem(
             sender_id=sender.id,
             recipient_id=item_data.recipient_id,
             pickup_location_id=item_data.pickup_location_id,
             dropoff_location_id=item_data.dropoff_location_id,
+            group_id=group.id,
             item_description=item_data.item_description,
-            status="pending",
+            status="queued",
         )
         db.add(new_item)
         db.commit()
@@ -858,15 +875,32 @@ class SendItemService:
             raise HTTPException(status_code=404, detail="Item not found")
         if item.sender_id != gucian.id:
             raise HTTPException(status_code=403, detail="You can only cancel your own requests")
-        if item.status != "pending":
-            raise HTTPException(status_code=400, detail="Only pending items can be cancelled")
+        if item.status not in ("queued",):
+            raise HTTPException(status_code=400, detail="This item can no longer be cancelled")
 
         item.status = "cancelled"
+
+        if item.group_id:
+            group = db.query(models.RideGroup).filter(models.RideGroup.id == item.group_id).first()
+            # items don't count toward passenger_total, so nothing to decrement there
+
         db.commit()
         db.refresh(item)
         return item
 
-
+    @staticmethod
+    def get_active_item(gucian: models.Gucian, db: Session):
+        item = (
+            db.query(models.SendItem)
+            .filter(
+                models.SendItem.sender_id == gucian.id,
+                models.SendItem.status.in_(["queued", "in_transit"]),
+            )
+            .order_by(models.SendItem.created_at.desc())
+            .first()
+        )
+        return item
+    
 class CarService:
 
     @staticmethod
@@ -875,29 +909,31 @@ class CarService:
         if car.status != "idle":
             raise HTTPException(status_code=400, detail="Car is not idle")
 
-        # atomic-ish claim: pick the highest-priority unlocked group with no assigned car,
-        # ordered by priority first, then oldest ride in that group
+        ride_group_ids = db.query(models.Ride.group_id).filter(models.Ride.status == "queued")
+        item_group_ids = db.query(models.SendItem.group_id).filter(models.SendItem.status == "queued")
+        candidate_group_ids = ride_group_ids.union(item_group_ids).subquery()
+
         next_group = (
             db.query(models.RideGroup)
-            .join(models.Ride, models.Ride.group_id == models.RideGroup.id)
+            .filter(models.RideGroup.id.in_(db.query(candidate_group_ids)))
             .filter(models.RideGroup.assigned_car_id.is_(None))
-            .filter(models.Ride.status == "queued")
-            .order_by(models.Ride.is_priority.desc(), models.Ride.created_at.asc())
+            .order_by(models.RideGroup.created_at.asc())  # simple FIFO across groups now
             .first()
         )
 
         if not next_group:
             return {"message": "No rides in queue"}
 
-        # claim it
         next_group.assigned_car_id = car.id
         next_group.locked = True
         car.current_group_id = next_group.id
         car.status = "en_route"
 
-        rides = db.query(models.Ride).filter(models.Ride.group_id == next_group.id).all()
+        rides = db.query(models.Ride).filter(models.Ride.group_id == next_group.id, models.Ride.status == "queued").all()
         for r in rides:
             r.status = "en_route"
+
+        items = db.query(models.SendItem).filter(models.SendItem.group_id == next_group.id, models.SendItem.status == "queued").all()
 
         db.commit()
         db.refresh(next_group)
@@ -908,36 +944,53 @@ class CarService:
             "destination_location_id": next_group.destination_location_id,
             "passenger_total": next_group.passenger_total,
             "ride_ids": [r.id for r in rides],
+            "item_ids": [i.id for i in items],
         }
-
     @staticmethod
     def mark_arrived(car: models.Car, db: Session):
         if car.status != "en_route" or not car.current_group_id:
             raise HTTPException(status_code=400, detail="Car has no active trip to mark as arrived")
 
         rides = db.query(models.Ride).filter(models.Ride.group_id == car.current_group_id).all()
+        items = db.query(models.SendItem).filter(
+            models.SendItem.group_id == car.current_group_id,
+            models.SendItem.status == "queued",
+        ).all()
+
         now = datetime.now(timezone.utc)
         for r in rides:
             r.status = "arrived"
             r.arrived_at = now
             r.grace_expires_at = now + timedelta(minutes=3)
 
+        for i in items:
+            i.status = "in_transit"
+
         car.status = "arrived"
         db.commit()
         return {"message": "Marked as arrived", "grace_expires_at": now + timedelta(minutes=3)}
-
+    
     @staticmethod
     def complete_ride(car: models.Car, db: Session):
         if not car.current_group_id:
             raise HTTPException(status_code=400, detail="Car has no active trip")
 
         rides = db.query(models.Ride).filter(models.Ride.group_id == car.current_group_id).all()
+        items = db.query(models.SendItem).filter(
+            models.SendItem.group_id == car.current_group_id,
+            models.SendItem.status == "in_transit",
+        ).all()
+
         now = datetime.now(timezone.utc)
         deadline = now + timedelta(seconds=90)
         for r in rides:
             r.status = "completed"
             r.completed_at = now
             r.departure_deadline = deadline
+
+        for i in items:
+            i.status = "delivered"
+            i.delivered_at = now
 
         group = db.query(models.RideGroup).filter(models.RideGroup.id == car.current_group_id).first()
 
@@ -1082,3 +1135,63 @@ class RatingService:
             "average_punctuality": round(result.avg_punctuality, 2) if result.avg_punctuality else None,
             "average_cleanliness": round(result.avg_cleanliness, 2) if result.avg_cleanliness else None,
         }
+
+class SendItemLiveService:
+
+    @staticmethod
+    def get_live_status(item_id: int, gucian: models.Gucian, db: Session):
+        item = db.query(models.SendItem).filter(models.SendItem.id == item_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        if item.sender_id != gucian.id and item.recipient_id != gucian.id:
+            raise HTTPException(status_code=403, detail="This isn't your item")
+
+        pickup_row = db.execute(text("SELECT name FROM locations WHERE id = :id"), {"id": item.pickup_location_id}).fetchone()
+        dropoff_row = db.execute(text("SELECT name FROM locations WHERE id = :id"), {"id": item.dropoff_location_id}).fetchone()
+
+        pickup_name = pickup_row.name
+        dropoff_name = dropoff_row.name
+        pickup_coords = coords.get(pickup_name)
+        dropoff_coords = coords.get(dropoff_name)
+
+        car = None
+        if item.group_id:
+            car = db.query(models.Car).filter(models.Car.current_group_id == item.group_id).first()
+
+        response = {
+            "item_id": item.id,
+            "status": item.status,
+            "item_description": item.item_description,
+            "pickup": {"name": pickup_name, "lat": pickup_coords[0], "lng": pickup_coords[1]} if pickup_coords else None,
+            "dropoff": {"name": dropoff_name, "lat": dropoff_coords[0], "lng": dropoff_coords[1]} if dropoff_coords else None,
+            "car": {"lat": car.current_lat, "lng": car.current_lng} if car and car.current_lat else None,
+            "path": [],
+        }
+
+        if item.status == "queued":
+            if pickup_coords and dropoff_coords:
+                result = get_route(graph, coords, pickup_name, dropoff_name)
+                if result["path"]:
+                    response["path"] = [list(coords[n]) for n in result["path"]]
+
+        elif item.status == "in_transit":
+            if pickup_coords and dropoff_coords:
+                result = get_route(graph, coords, pickup_name, dropoff_name)
+                if result["path"]:
+                    response["path"] = [list(coords[n]) for n in result["path"]]
+
+        return response
+
+class ActiveStatusService:
+
+    @staticmethod
+    def get_active(gucian: models.Gucian, db: Session):
+        ride = RideService.get_active_ride(gucian, db)
+        if ride:
+            return {"active": True, "type": "ride", "id": ride.id, "status": ride.status}
+
+        item = SendItemService.get_active_item(gucian, db)
+        if item:
+            return {"active": True, "type": "item", "id": item.id, "status": item.status}
+
+        return {"active": False}

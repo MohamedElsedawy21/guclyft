@@ -139,6 +139,7 @@ class SendItem(Base):
     recipient_id = Column(String(50), ForeignKey("gucians.id"), nullable=True)
     pickup_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
     dropoff_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    group_id = Column(Integer, ForeignKey("ride_groups.id"), nullable=True)
     item_description = Column(String(255), nullable=False)
     status = Column(String(20), nullable=False, default="pending")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -146,7 +147,7 @@ class SendItem(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','in_transit','delivered','cancelled')",
+            "status IN ('pending','queued','in_transit','delivered','cancelled')",
             name="valid_send_item_status"
         ),
     )
@@ -155,7 +156,6 @@ class SendItem(Base):
     recipient = relationship("Gucian", foreign_keys=[recipient_id])
     pickup_location = relationship("Location", foreign_keys=[pickup_location_id])
     dropoff_location = relationship("Location", foreign_keys=[dropoff_location_id])
-
 
 class Car(Base):
     __tablename__ = "cars"

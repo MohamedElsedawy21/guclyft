@@ -78,4 +78,13 @@ class SendItemService {
       throw Exception(error['detail'] ?? "Failed to cancel");
     }
   }
+
+  static Future<Map<String, dynamic>> getLiveStatus(int itemId) async {
+    final res = await ApiService.get("/send-items/$itemId/live", auth: true);
+    if (res.statusCode == 200) {
+      return jsonDecode(res.body);
+    } else {
+      throw Exception("Failed to load item status");
+    }
+  }
 }

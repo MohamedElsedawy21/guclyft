@@ -22,15 +22,14 @@ class RideService {
     }
   }
 
-    static Future<Map<String, dynamic>> getActiveRide() async {
-    final res = await ApiService.get("/rides/mine/active", auth: true);
+  static Future<Map<String, dynamic>> getActiveStatus() async {
+    final res = await ApiService.get("/active-status", auth: true);
     if (res.statusCode == 200) {
       return jsonDecode(res.body);
     } else {
-      throw Exception("Failed to check active ride");
+      throw Exception("Failed to check active status");
     }
   }
-
   static Future<Map<String, dynamic>> getLiveStatus(int rideId) async {
     final res = await ApiService.get("/rides/$rideId/live", auth: true);
     if (res.statusCode == 200) {

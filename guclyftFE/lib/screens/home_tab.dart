@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../services/ride_service.dart';
 import '../services/location_service.dart';
+import '../services/ride_suggestion_engine.dart';
 import '../widgets/campus_map.dart';
+import '../widgets/suggested_trips_row.dart';
 import '../services/send_item_service.dart';
 import 'live_ride_screen.dart';
 
@@ -32,12 +34,14 @@ class _HomeTabState extends State<HomeTab> {
   bool _submitting = false;
   String? _error;
   Map<String, dynamic>? _result;
+  List<TripSuggestion> _suggestions = [];
 
   @override
   void initState() {
     super.initState();
     _checkActiveRide();
     _loadLocations();
+    _loadSuggestions();
   }
 
   Future<void> _checkActiveRide() async {
@@ -65,6 +69,29 @@ class _HomeTabState extends State<HomeTab> {
     } finally {
       setState(() => _loadingLocations = false);
     }
+  }
+
+  Future<void> _loadSuggestions() async {
+    try {
+      final history = await RideService.getHistory();
+      final suggestions = RideSuggestionEngine.suggest(history.cast<Map<String, dynamic>>());
+      if (mounted) setState(() => _suggestions = suggestions);
+    } catch (_) {
+      // suggestions are a nice-to-have — fail silently, form still works
+    }
+  }
+
+  void _applySuggestion(TripSuggestion suggestion) {
+    final pickup = _locations.where((l) => l.name == suggestion.pickupName).toList();
+    final destination = _locations.where((l) => l.name == suggestion.destinationName).toList();
+    if (pickup.isEmpty || destination.isEmpty) return;
+
+    setState(() {
+      _mode = _Mode.book;
+      _pickupId = pickup.first.id;
+      _destinationId = destination.first.id;
+      _error = null;
+    });
   }
 
   void _onPinTapped(AppLocation loc) {
@@ -298,6 +325,13 @@ class _HomeTabState extends State<HomeTab> {
                       ? "Confirm Schedule"
                       : "Send Item"),
         ),
+
+        if (_mode == _Mode.book && _suggestions.isNotEmpty) ...[
+          const SizedBox(height: 28),
+          const Divider(),
+          const SizedBox(height: 12),
+          SuggestedTripsRow(suggestions: _suggestions, onTap: _applySuggestion),
+        ],
       ],
     );
   }

@@ -2,7 +2,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../services/ride_service.dart';
+import '../services/rating_service.dart';
 import '../widgets/campus_map.dart';
+import '../widgets/rate_ride_sheet.dart';
+import '../widgets/star_rating.dart';
 
 class LiveRideScreen extends StatefulWidget {
   final int rideId;
@@ -28,6 +31,10 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   bool _cancelling = false;
 
   String? _error;
+
+  Map<String, dynamic>? _rating;
+  bool _ratingLoading = false;
+  bool _ratingChecked = false;
 
   @override
   void initState() {
@@ -65,6 +72,29 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       if (mounted) setState(() => _cancelling = false);
     }
   }
+  Future<void> _checkRating() async {
+    _ratingChecked = true;
+    setState(() => _ratingLoading = true);
+    try {
+      final rating = await RatingService.getRating(widget.rideId);
+      if (mounted) setState(() => _rating = rating);
+    } catch (_) {
+      // silently ignore — rating prompt just won't show pre-filled
+    } finally {
+      if (mounted) setState(() => _ratingLoading = false);
+    }
+  }
+
+  Future<void> _openRateSheet() async {
+    final result = await showRateRideSheet(context, widget.rideId);
+    if (result != null && mounted) {
+      setState(() => _rating = result);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Thanks for rating your ride!")),
+      );
+    }
+  }
+
   Future<void> _fetch() async {
     try {
       final data = await RideService.getLiveStatus(widget.rideId);
@@ -80,6 +110,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
         widget.onRideFinished?.call();
         _pollTimer?.cancel();
       } else if (status == "completed") {
+        if (!_ratingChecked) _checkRating();
         final exitSeconds = _secondsLeft(data['departure_deadline']);
         if (exitSeconds != null && exitSeconds <= 0) {
           widget.onRideFinished?.call();
@@ -217,6 +248,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
           subtitle: exitSeconds != null && exitSeconds > 0
               ? "Please exit within: ${exitSeconds}s"
               : "Thanks for riding with Guclyft!",
+          extra: _buildRatingSection(),
         );
       case "no_show":
         return _card(
@@ -227,6 +259,45 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       default:
         return _card(icon: Icons.info_outline, title: "Status: $status");
     }
+  }
+
+  Widget _buildRatingSection() {
+    if (_ratingLoading) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 16),
+        child: SizedBox(
+          height: 20,
+          width: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+
+    if (_rating != null) {
+      final stars = _rating!['stars'] as num;
+      return Padding(
+        padding: const EdgeInsets.only(top: 16),
+        child: Column(
+          children: [
+            const Text("Your rating", style: TextStyle(color: Colors.grey, fontSize: 13)),
+            const SizedBox(height: 4),
+            StarRatingDisplay(value: stars, size: 22),
+          ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 16),
+      child: SizedBox(
+        width: double.infinity,
+        child: ElevatedButton.icon(
+          onPressed: _openRateSheet,
+          icon: const Icon(Icons.star_rounded, color: AppColors.black),
+          label: const Text("Rate this ride"),
+        ),
+      ),
+    );
   }
 
   Widget _card({required IconData icon, required String title, String? subtitle, Widget? extra}) {

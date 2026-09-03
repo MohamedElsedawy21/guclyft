@@ -218,6 +218,13 @@ def get_active_ride(
         return {"active": False}
     return {"active": True, "ride_id": ride.id, "status": ride.status}
 
+@app.get("/rides/mine/history", response_model=list[schemas.RideHistoryItem])
+def get_ride_history(
+    current_gucian: models.Gucian = Depends(auth.get_current_gucian),
+    db: Session = Depends(get_db),
+):
+    return RideService.get_history(current_gucian, db)
+
 @app.put("/rides/{ride_id}/cancel", response_model=schemas.RideCancelResponse)
 def cancel_ride(
     ride_id: int,

@@ -697,6 +697,47 @@ class RideService:
             "status": ride.status,
             "message": message,
         }
+
+    @staticmethod
+    def get_history(gucian: models.Gucian, db: Session):
+        """Returns the gucian's past rides (completed/cancelled/no_show), newest first,
+        each with its rating attached if one exists."""
+        rides = (
+            db.query(models.Ride)
+            .filter(
+                models.Ride.user_id == gucian.id,
+                models.Ride.status.in_(["completed", "cancelled", "no_show"]),
+            )
+            .order_by(models.Ride.created_at.desc())
+            .all()
+        )
+ 
+        if not rides:
+            return []
+ 
+        ride_ids = [r.id for r in rides]
+        ratings = {
+            r.ride_id: r
+            for r in db.query(models.RatingFeedback)
+            .filter(models.RatingFeedback.ride_id.in_(ride_ids))
+            .all()
+        }
+ 
+        history = []
+        for ride in rides:
+            history.append(
+                schemas.RideHistoryItem(
+                    ride_id=ride.id,
+                    status=ride.status,
+                    pickup_name=ride.pickup_location.name,
+                    destination_name=ride.destination_location.name,
+                    created_at=ride.created_at,
+                    completed_at=ride.completed_at,
+                    rating=ratings.get(ride.id),
+                )
+            )
+        return history
+    
 class LocationService:
 
     @staticmethod

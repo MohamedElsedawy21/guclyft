@@ -245,3 +245,15 @@ class RatingAdminView(BaseModel):
     cleanliness: Optional[int] = None
     comment: Optional[str] = None
     created_at: datetime
+
+class RideHistoryItem(BaseModel):
+    ride_id: int
+    status: str
+    pickup_name: str
+    destination_name: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    rating: Optional[RatingResponse] = None
+ 
+    class Config:
+        from_attributes = True   

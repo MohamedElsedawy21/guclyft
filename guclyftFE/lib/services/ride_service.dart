@@ -69,4 +69,12 @@ class RideService {
       throw Exception(error['detail'] ?? "Failed to cancel ride");
     }
   }
+  static Future<List<dynamic>> getHistory() async {
+    final res = await ApiService.get("/rides/mine/history", auth: true);
+    if (res.statusCode == 200) {
+      return jsonDecode(res.body);
+    } else {
+      throw Exception("Failed to load past trips");
+    }
+  }
 }
